@@ -18,6 +18,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.math.min
 
 
 // Advice: always treat time as a Duration
@@ -42,6 +43,7 @@ class PaymentExternalServiceImpl(
 
     private val requestSenderPool = Executors.newFixedThreadPool(100)
     private var predictedAccount = baseProperties
+    private val accountSpeed = min(baseProperties.rateLimitPerSec.toLong(), baseProperties.parallelRequests * 1000 / baseProperties.request95thPercentileProcessingTime.toMillis())
     private val window = NonBlockingOngoingWindow(500)
     private val rateLimiter = RateLimiter(100)
 
