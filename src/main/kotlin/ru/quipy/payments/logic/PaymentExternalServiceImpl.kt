@@ -10,6 +10,8 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import ru.quipy.payments.config.AccountStatisticsService
+import ru.quipy.payments.config.ExternalServicesConfig
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -18,7 +20,7 @@ import java.util.concurrent.Executors
 
 // Advice: always treat time as a Duration
 class PaymentExternalServiceImpl(
-    private val properties: ExternalServiceProperties,
+    private val baseProperties: ExternalServiceProperties,
 ) : PaymentExternalService {
 
     companion object {
@@ -30,11 +32,17 @@ class PaymentExternalServiceImpl(
         val mapper = ObjectMapper().registerKotlinModule()
     }
 
-    private val serviceName = properties.serviceName
-    private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.request95thPercentileProcessingTime
-    private val rateLimitPerSec = properties.rateLimitPerSec
-    private val parallelRequests = properties.parallelRequests
+    private val serviceName = baseProperties.serviceName
+    private val accountName = baseProperties.accountName
+    private val requestAverageProcessingTime = baseProperties.request95thPercentileProcessingTime
+    private val rateLimitPerSec = baseProperties.rateLimitPerSec
+    private val parallelRequests = baseProperties.parallelRequests
+
+    private val requestSenderPool = Executors.newFixedThreadPool(100)
+    private var predictedAccount = baseProperties
+
+    @Autowired
+    private lateinit var accountStatisticsService: AccountStatisticsService
 
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
@@ -58,6 +66,32 @@ class PaymentExternalServiceImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
+        while (true) {
+            val targetAccount = predictedAccount
+            if (accountStatisticsService.trySendRequest(targetAccount)) {
+                requestSenderPool.submit {
+                    sendRequest(paymentId, amount, paymentStartedAt, transactionId)
+                }
+                val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount)
+                if (cheaperAccount != null) {
+                    predictedAccount = cheaperAccount
+                }
+                return
+            } else {
+                val costlierAccount = ExternalServicesConfig.getCostlier(predictedAccount)
+                if (costlierAccount == null) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "No available accounts")
+                    }
+                    return
+                }
+
+                predictedAccount = costlierAccount
+            }
+        }
+    }
+
+    private fun sendRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, transactionId: UUID) {
         val request = Request.Builder().run {
             url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
             post(emptyBody)
