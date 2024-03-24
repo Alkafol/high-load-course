@@ -8,6 +8,8 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import ru.quipy.common.utils.NonBlockingOngoingWindow
+import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountStatisticsService
@@ -40,6 +42,8 @@ class PaymentExternalServiceImpl(
 
     private val requestSenderPool = Executors.newFixedThreadPool(100)
     private var predictedAccount = baseProperties
+    private val window = NonBlockingOngoingWindow(500)
+    private val rateLimiter = RateLimiter(100)
 
     @Autowired
     private lateinit var accountStatisticsService: AccountStatisticsService
@@ -66,6 +70,24 @@ class PaymentExternalServiceImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
+        // rate limiter -- 100 per ser
+        if (!rateLimiter.tick()) {
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "Rate limiter overfill")
+            }
+
+            return
+        }
+
+        // window -- 500 in parallel
+        if (window.putIntoWindow() == NonBlockingOngoingWindow.WindowResponse.Fail(100)){
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "Window overfill")
+            }
+
+            return
+        }
+
         while (true) {
             val targetAccount = predictedAccount
             if (accountStatisticsService.trySendRequest(targetAccount)) {
@@ -76,19 +98,21 @@ class PaymentExternalServiceImpl(
                 if (cheaperAccount != null) {
                     predictedAccount = cheaperAccount
                 }
-                return
+                break
             } else {
                 val costlierAccount = ExternalServicesConfig.getCostlier(predictedAccount)
                 if (costlierAccount == null) {
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "No available accounts")
                     }
-                    return
+                    break
                 }
 
                 predictedAccount = costlierAccount
             }
         }
+
+        window.releaseWindow()
     }
 
     private fun sendRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, transactionId: UUID) {
