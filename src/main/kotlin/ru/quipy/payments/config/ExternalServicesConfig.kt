@@ -10,8 +10,6 @@ import java.time.Duration
 @Configuration
 class ExternalServicesConfig {
     companion object {
-        const val PRIMARY_PAYMENT_BEAN = "PRIMARY_PAYMENT_BEAN"
-
         // Ниже приведены готовые конфигурации нескольких аккаунтов провайдера оплаты.
         // Заметьте, что каждый аккаунт обладает своими характеристиками и стоимостью вызова.
 
@@ -51,11 +49,13 @@ class ExternalServicesConfig {
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
+        val PRIMARY_ACCOUNT = accountProps_4
+
         fun getCheaper(account: ExternalServiceProperties?) =
             when (account) {
                 accountProps_1 -> accountProps_2
-              //  accountProps_2 -> accountProps_3
-              //  accountProps_3 -> accountProps_4
+                accountProps_2 -> accountProps_3
+                accountProps_3 -> accountProps_4
                 else -> null
             }
 
@@ -63,17 +63,11 @@ class ExternalServicesConfig {
         fun getCostlier(account: ExternalServiceProperties?) =
             when (account) {
                 accountProps_2 -> accountProps_1
-              //  accountProps_3 -> accountProps_2
-              //  accountProps_4 -> accountProps_3
+                accountProps_3 -> accountProps_2
+                accountProps_4 -> accountProps_3
                 else -> null
             }
 
-        fun getAll() = listOf(accountProps_1, accountProps_2) //accountProps_3, accountProps_4)
+        fun getAll() = listOf(accountProps_1, accountProps_2, accountProps_3, accountProps_4)
     }
-
-    @Bean(PRIMARY_PAYMENT_BEAN)
-    fun fastExternalService() =
-        PaymentExternalServiceImpl(
-            accountProps_2,
-        )
 }

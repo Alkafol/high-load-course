@@ -2,29 +2,32 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import okhttp3.Dispatcher
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.stereotype.Component
 import ru.quipy.common.utils.NonBlockingOngoingWindow
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import ru.quipy.payments.config.AccountProperties
 import ru.quipy.payments.config.AccountStatisticsService
 import ru.quipy.payments.config.ExternalServicesConfig
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
-import kotlin.math.min
+import kotlin.Comparator
 
 
 // Advice: always treat time as a Duration
-class PaymentExternalServiceImpl(
-    private val baseProperties: ExternalServiceProperties,
+@Component
+class PaymentExternalServiceImpl @Autowired constructor(
+    private val accountStatisticsService: AccountStatisticsService,
+    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 ) : PaymentExternalService {
+
+    private val baseProperties = ExternalServicesConfig.PRIMARY_ACCOUNT
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
@@ -42,22 +45,27 @@ class PaymentExternalServiceImpl(
     private val parallelRequests = baseProperties.parallelRequests
 
     private val requestSenderPool = Executors.newFixedThreadPool(100)
-    private var predictedAccount = baseProperties
-    private val accountSpeed = min(baseProperties.rateLimitPerSec.toLong(), baseProperties.parallelRequests * 1000 / baseProperties.request95thPercentileProcessingTime.toMillis())
+    private var predictedExtAccount = baseProperties
+    private var predictedAccount: AccountProperties? = accountStatisticsService.getProperties(predictedExtAccount)
     private val window = NonBlockingOngoingWindow(500)
     private val rateLimiter = RateLimiter(100)
-
-    @Autowired
-    private lateinit var accountStatisticsService: AccountStatisticsService
-
-    @Autowired
-    private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
     private val httpClientExecutor = Executors.newSingleThreadExecutor()
 
     private val client = OkHttpClient.Builder().run {
         dispatcher(Dispatcher(httpClientExecutor))
         build()
+    }
+
+    private var requestExecutor = RequestExecutor(
+        client, paymentESService
+    )
+
+    init {
+        predictedAccount = accountStatisticsService.getProperties(predictedExtAccount)
+        accountStatisticsService.statistics.entries.forEach {
+            requestExecutor.execute(it.value)
+        }
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
@@ -91,18 +99,10 @@ class PaymentExternalServiceImpl(
         }
 
         while (true) {
-            val targetAccount = predictedAccount
-            if (accountStatisticsService.trySendRequest(targetAccount)) {
-                requestSenderPool.submit {
-                    sendRequest(paymentId, amount, paymentStartedAt, transactionId)
-                }
-                val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount)
-                if (cheaperAccount != null) {
-                    predictedAccount = cheaperAccount
-                }
-                break
-            } else {
-                val costlierAccount = ExternalServicesConfig.getCostlier(predictedAccount)
+            val targetAccount = predictedAccount ?: error("Predicted account can't be null")
+            if (targetAccount.queue.size > targetAccount.maxSize) {
+                val costlierAccount = ExternalServicesConfig.getCostlier(predictedExtAccount)
+
                 if (costlierAccount == null) {
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "No available accounts")
@@ -110,53 +110,21 @@ class PaymentExternalServiceImpl(
                     break
                 }
 
-                predictedAccount = costlierAccount
+                predictedAccount = accountStatisticsService.getProperties(costlierAccount)
+            } else {
+                val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
+                predictedAccount!!.queue.add(requestData)
+
+                val cheaperAccount = ExternalServicesConfig.getCheaper(predictedExtAccount)
+                if (cheaperAccount != null) {
+                    predictedAccount = accountStatisticsService.getProperties(cheaperAccount)
+                }
+
+                break
             }
         }
 
         window.releaseWindow()
-    }
-
-    private fun sendRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, transactionId: UUID) {
-        val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId")
-            post(emptyBody)
-        }.build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(false, e.message)
-                }
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-            }
-        } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
-                }
-
-                else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
-                }
-            }
-        }
     }
 }
 
