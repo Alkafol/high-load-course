@@ -13,13 +13,11 @@ import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountProperties
 import ru.quipy.payments.config.AccountStatisticsService
 import ru.quipy.payments.config.ExternalServicesConfig
-import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.Comparator
-
 
 // Advice: always treat time as a Duration
 @Component
@@ -52,10 +50,16 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private val window = NonBlockingOngoingWindow(2000)
     private val rateLimiter = RateLimiter(600)
 
+    private val limiterQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
+    private val windowQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
+
     init {
         accountStatisticsService.statistics.entries.forEach {
             requestExecutor.execute(it.value)
         }
+
+        runLimiterWorker()
+        runWindowWorker()
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
@@ -70,23 +74,15 @@ class PaymentExternalServiceImpl @Autowired constructor(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        // rate limiter -- 100 per ser
-        if (!rateLimiter.tick()) {
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = "Rate limiter overfill")
-            }
+        val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
 
-            return
-        }
+        // rate limiter -- 600 per ser
+        limiterQueue.add(requestData)
+    }
 
-        // window -- 500 in parallel
-        if (window.putIntoWindow() == NonBlockingOngoingWindow.WindowResponse.Fail(2000)){
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = "Window overfill")
-            }
-
-            return
-        }
+    private fun predictAccountAndSend(requestData: RequestData) {
+        val paymentId = requestData.paymentId
+        val transactionId = requestData.transactionId
 
         while (true) {
             val targetAccount = predictedAccount.get() ?: error("Predicted account can't be null")
@@ -102,7 +98,6 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
                 predictedAccount.compareAndSet(targetAccount, accountStatisticsService.getProperties(costlierAccount))
             } else {
-                val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
                 targetAccount.queue.add(requestData)
 
                 val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount.extProperties)
@@ -115,6 +110,30 @@ class PaymentExternalServiceImpl @Autowired constructor(
         }
 
         window.releaseWindow()
+    }
+
+    private fun runWindowWorker() {
+        Thread {
+            while (true) {
+                if (windowQueue.isNotEmpty()) {
+                    if (window.putIntoWindow() is NonBlockingOngoingWindow.WindowResponse.Success) {
+                        predictAccountAndSend(windowQueue.poll())
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun runLimiterWorker() {
+        Thread {
+            while (true) {
+                if (limiterQueue.isNotEmpty()) {
+                    if (rateLimiter.tick()) {
+                        windowQueue.add(limiterQueue.poll())
+                    }
+                }
+            }
+        }.start()
     }
 }
 
