@@ -1,8 +1,6 @@
 package ru.quipy.payments.logic
 
-import okhttp3.Dispatcher
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import okhttp3.*
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 import ru.quipy.core.EventSourcingService
@@ -10,8 +8,10 @@ import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountProperties
 import ru.quipy.payments.config.AccountStatisticsService
 import java.net.SocketTimeoutException
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class RequestData(
     val paymentId: UUID,
@@ -26,11 +26,16 @@ class RequestExecutor @Autowired constructor(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 ) {
 
-    private val httpClientExecutor = Executors.newSingleThreadExecutor()
-    private val client = OkHttpClient.Builder().run {
-        dispatcher(Dispatcher(httpClientExecutor))
-        build()
-    }
+    private val httpClientExecutor = Executors.newFixedThreadPool(20)
+    private val client = OkHttpClient.Builder()
+        .followRedirects(false)
+        .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
+        .connectionPool(ConnectionPool(100, 1000, TimeUnit.MILLISECONDS))
+        .run {
+            dispatcher(Dispatcher(httpClientExecutor))
+            build()
+        }
+    private val responsePool = Executors.newFixedThreadPool(10)
 
     fun execute(accountProperties: AccountProperties) {
         Thread {
@@ -59,7 +64,7 @@ class RequestExecutor @Autowired constructor(
         try {
             client.newCall(request).execute().use { response ->
                 val body = try {
-                //    val parsedBody = response.body?.string()
+                    //    val parsedBody = response.body?.string()
                     PaymentExternalServiceImpl.mapper.readValue(
                         response.body?.string(),
                         ExternalSysResponse::class.java
@@ -69,15 +74,17 @@ class RequestExecutor @Autowired constructor(
                     ExternalSysResponse(false, e.message)
                 }
 
-                PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+                responsePool.execute {
+                    PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    }
+
+                    accountStatisticsService.receiveResponse(accountProperties.extProperties)
                 }
-
-                accountStatisticsService.receiveResponse(accountProperties.extProperties)
             }
         } catch (e: Exception) {
             when (e) {

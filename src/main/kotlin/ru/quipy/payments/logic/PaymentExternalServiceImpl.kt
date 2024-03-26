@@ -49,8 +49,8 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private val requestSenderPool = Executors.newFixedThreadPool(100)
     private var predictedExtAccount = baseProperties
     private var predictedAccount: AtomicReference<AccountProperties?> = AtomicReference(accountStatisticsService.getProperties(predictedExtAccount))
-    private val window = NonBlockingOngoingWindow(500)
-    private val rateLimiter = RateLimiter(100)
+    private val window = NonBlockingOngoingWindow(2000)
+    private val rateLimiter = RateLimiter(600)
 
     init {
         accountStatisticsService.statistics.entries.forEach {
@@ -80,7 +80,7 @@ class PaymentExternalServiceImpl @Autowired constructor(
         }
 
         // window -- 500 in parallel
-        if (window.putIntoWindow() == NonBlockingOngoingWindow.WindowResponse.Fail(100)){
+        if (window.putIntoWindow() == NonBlockingOngoingWindow.WindowResponse.Fail(2000)){
             paymentESService.update(paymentId) {
                 it.logProcessing(false, now(), transactionId, reason = "Window overfill")
             }
