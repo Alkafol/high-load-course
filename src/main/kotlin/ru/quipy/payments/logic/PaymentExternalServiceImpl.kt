@@ -24,7 +24,8 @@ import java.util.concurrent.atomic.AtomicReference
 class PaymentExternalServiceImpl @Autowired constructor(
     private val accountStatisticsService: AccountStatisticsService,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
-    private val requestExecutor: RequestExecutor
+    private val requestExecutor: RequestExecutor,
+    private val window: NonBlockingOngoingWindow
 ) : PaymentExternalService {
 
     private val baseProperties = ExternalServicesConfig.PRIMARY_ACCOUNT
@@ -47,7 +48,6 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private val requestSenderPool = Executors.newFixedThreadPool(100)
     private var predictedExtAccount = baseProperties
     private var predictedAccount: AtomicReference<AccountProperties?> = AtomicReference(accountStatisticsService.getProperties(predictedExtAccount))
-    private val window = NonBlockingOngoingWindow(2000)
     private val rateLimiter = RateLimiter(600)
 
     private val limiterQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
@@ -108,8 +108,6 @@ class PaymentExternalServiceImpl @Autowired constructor(
                 break
             }
         }
-
-        window.releaseWindow()
     }
 
     private fun runWindowWorker() {

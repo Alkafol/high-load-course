@@ -3,6 +3,7 @@ package ru.quipy.payments.logic
 import okhttp3.*
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+import ru.quipy.common.utils.NonBlockingOngoingWindow
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountProperties
@@ -23,7 +24,8 @@ data class RequestData(
 @Component
 class RequestExecutor @Autowired constructor(
     private val accountStatisticsService: AccountStatisticsService,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
+    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+    private val window: NonBlockingOngoingWindow
 ) {
 
     private val httpClientExecutor = Executors.newFixedThreadPool(20)
@@ -84,6 +86,7 @@ class RequestExecutor @Autowired constructor(
                     }
 
                     accountStatisticsService.receiveResponse(accountProperties.extProperties)
+                    window.releaseWindow()
                 }
             }
         } catch (e: Exception) {
@@ -107,6 +110,7 @@ class RequestExecutor @Autowired constructor(
             }
 
             accountStatisticsService.receiveResponse(accountProperties.extProperties)
+            window.releaseWindow()
         }
     }
 }

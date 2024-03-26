@@ -1,5 +1,8 @@
 package ru.quipy.common.utils
 
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.stereotype.Component
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -46,4 +49,12 @@ class OngoingWindow(
     }
 
     fun release() = window.release()
+}
+
+@Configuration
+class WindowConfig {
+    @Bean
+    fun window(): NonBlockingOngoingWindow {
+        return NonBlockingOngoingWindow(2000)
+    }
 }
