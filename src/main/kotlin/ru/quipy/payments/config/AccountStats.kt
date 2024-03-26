@@ -37,14 +37,18 @@ class AccountStatisticsService {
     }
 
     fun trySendRequest(account: ExternalServiceProperties): Boolean {
-        val curAccountStats = statistics[account] ?: error("No statistics for account: ${account.accountName}")
-        val curAccountRequests = curAccountStats.curRequestsAmount.get()
+        while (true) {
+            val curAccountStats = statistics[account] ?: error("No statistics for account: ${account.accountName}")
+            val curAccountRequests = curAccountStats.curRequestsAmount.get()
 
-        if (curAccountRequests >= curAccountStats.maxSize) {
-            return false
+            if (curAccountRequests >= curAccountStats.maxSize) {
+                return false
+            }
+
+            if (curAccountStats.curRequestsAmount.compareAndSet(curAccountRequests, curAccountRequests + 1)) {
+                return true
+            }
         }
-
-        return curAccountStats.curRequestsAmount.compareAndSet(curAccountRequests, curAccountRequests + 1)
     }
 
     fun receiveResponse(account: ExternalServiceProperties) {
