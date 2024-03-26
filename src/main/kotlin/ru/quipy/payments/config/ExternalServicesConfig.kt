@@ -49,13 +49,13 @@ class ExternalServicesConfig {
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
-        val PRIMARY_ACCOUNT = accountProps_4
+        val PRIMARY_ACCOUNT = accountProps_3
 
         fun getCheaper(account: ExternalServiceProperties?) =
             when (account) {
                 accountProps_1 -> accountProps_2
                 accountProps_2 -> accountProps_3
-                accountProps_3 -> accountProps_4
+           //     accountProps_3 -> accountProps_4
                 else -> null
             }
 
@@ -64,10 +64,10 @@ class ExternalServicesConfig {
             when (account) {
                 accountProps_2 -> accountProps_1
                 accountProps_3 -> accountProps_2
-                accountProps_4 -> accountProps_3
+          //      accountProps_4 -> accountProps_3
                 else -> null
             }
 
-        fun getAll() = listOf(accountProps_1, accountProps_2, accountProps_3, accountProps_4)
+        fun getAll() = listOf(accountProps_1, accountProps_2, accountProps_3) //  accountProps_4)
     }
 }

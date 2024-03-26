@@ -17,6 +17,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.Comparator
 
 
@@ -24,7 +25,8 @@ import kotlin.Comparator
 @Component
 class PaymentExternalServiceImpl @Autowired constructor(
     private val accountStatisticsService: AccountStatisticsService,
-    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
+    private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+    private val requestExecutor: RequestExecutor
 ) : PaymentExternalService {
 
     private val baseProperties = ExternalServicesConfig.PRIMARY_ACCOUNT
@@ -46,23 +48,11 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
     private val requestSenderPool = Executors.newFixedThreadPool(100)
     private var predictedExtAccount = baseProperties
-    private var predictedAccount: AccountProperties? = accountStatisticsService.getProperties(predictedExtAccount)
+    private var predictedAccount: AtomicReference<AccountProperties?> = AtomicReference(accountStatisticsService.getProperties(predictedExtAccount))
     private val window = NonBlockingOngoingWindow(500)
     private val rateLimiter = RateLimiter(100)
 
-    private val httpClientExecutor = Executors.newSingleThreadExecutor()
-
-    private val client = OkHttpClient.Builder().run {
-        dispatcher(Dispatcher(httpClientExecutor))
-        build()
-    }
-
-    private var requestExecutor = RequestExecutor(
-        client, paymentESService
-    )
-
     init {
-        predictedAccount = accountStatisticsService.getProperties(predictedExtAccount)
         accountStatisticsService.statistics.entries.forEach {
             requestExecutor.execute(it.value)
         }
@@ -99,9 +89,9 @@ class PaymentExternalServiceImpl @Autowired constructor(
         }
 
         while (true) {
-            val targetAccount = predictedAccount ?: error("Predicted account can't be null")
-            if (targetAccount.queue.size > targetAccount.maxSize) {
-                val costlierAccount = ExternalServicesConfig.getCostlier(predictedExtAccount)
+            val targetAccount = predictedAccount.get() ?: error("Predicted account can't be null")
+            if (!accountStatisticsService.trySendRequest(targetAccount.extProperties)) {
+                val costlierAccount = ExternalServicesConfig.getCostlier(targetAccount.extProperties)
 
                 if (costlierAccount == null) {
                     paymentESService.update(paymentId) {
@@ -110,14 +100,14 @@ class PaymentExternalServiceImpl @Autowired constructor(
                     break
                 }
 
-                predictedAccount = accountStatisticsService.getProperties(costlierAccount)
+                predictedAccount.compareAndSet(targetAccount, accountStatisticsService.getProperties(costlierAccount))
             } else {
                 val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
-                predictedAccount!!.queue.add(requestData)
+                targetAccount.queue.add(requestData)
 
-                val cheaperAccount = ExternalServicesConfig.getCheaper(predictedExtAccount)
+                val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount.extProperties)
                 if (cheaperAccount != null) {
-                    predictedAccount = accountStatisticsService.getProperties(cheaperAccount)
+                    predictedAccount.compareAndSet(targetAccount, accountStatisticsService.getProperties(cheaperAccount))
                 }
 
                 break
