@@ -1,5 +1,6 @@
 package ru.quipy.payments.config
 
+import org.springframework.scheduling.concurrent.CustomizableThreadFactory
 import org.springframework.stereotype.Service
 import ru.quipy.payments.logic.ExternalServiceProperties
 import ru.quipy.payments.logic.RequestData
@@ -14,8 +15,8 @@ class AccountProperties (
     val maxSize: Long = speed?.times(80)?.toLong() ?: error("Invalid speed"),
     val curRequestsAmount: AtomicInteger = AtomicInteger(0),
     val queue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue(),
-    val pool: ExecutorService = Executors.newFixedThreadPool(30),
-    val extProperties: ExternalServiceProperties
+    val extProperties: ExternalServiceProperties,
+    val pool: ExecutorService = Executors.newFixedThreadPool(30, CustomizableThreadFactory("${extProperties.accountName}_"))
 )
 
 @Service
