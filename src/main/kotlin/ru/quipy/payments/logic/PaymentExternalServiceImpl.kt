@@ -53,6 +53,8 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private val limiterQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
     private val windowQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
 
+    // TODO: fix errors for first test
+    // TODO: timeout
     init {
         accountStatisticsService.statistics.entries.forEach {
             requestExecutor.execute(it.value)

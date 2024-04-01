@@ -63,6 +63,7 @@ class RequestExecutor @Autowired constructor(
             post(PaymentExternalServiceImpl.emptyBody)
         }.build()
 
+        // TODO: use submit + separate threads
         try {
             client.newCall(request).execute().use { response ->
                 val body = try {
