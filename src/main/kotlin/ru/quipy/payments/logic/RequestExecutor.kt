@@ -9,6 +9,8 @@ import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountProperties
 import ru.quipy.payments.config.AccountStatisticsService
 import java.net.SocketTimeoutException
+import java.time.Duration
+import java.time.Instant
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -28,6 +30,7 @@ class RequestExecutor @Autowired constructor(
     private val window: NonBlockingOngoingWindow
 ) {
 
+    private val requestTimeout: Duration = Duration.ofMillis(80000)
     private val httpClientExecutor = Executors.newFixedThreadPool(20)
     private val client = OkHttpClient.Builder()
         .followRedirects(false)
@@ -57,6 +60,13 @@ class RequestExecutor @Autowired constructor(
         val accountName = accountProperties.extProperties.accountName
         val transactionId = requestData.transactionId
         val paymentId = requestData.paymentId
+
+        val timeSinceRequestCreation = Duration.ofMillis(now() - requestData.paymentStartedAt)
+        if (timeSinceRequestCreation > requestTimeout) {
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "Request is out of time")
+            }
+        }
 
         val request = Request.Builder().run {
             url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=${transactionId}")
