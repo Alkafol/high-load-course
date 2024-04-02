@@ -6,6 +6,7 @@ import okhttp3.*
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
+import ru.quipy.common.utils.CustomPolicy
 import ru.quipy.common.utils.NonBlockingOngoingWindow
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
@@ -15,8 +16,13 @@ import ru.quipy.payments.config.AccountStatisticsService
 import ru.quipy.payments.config.ExternalServicesConfig
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 // Advice: always treat time as a Duration
@@ -37,6 +43,12 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+
+        private val limiterQueue: BlockingQueue<Runnable> = ArrayBlockingQueue(1000)
+        private val windowQueue: BlockingQueue<Runnable> = ArrayBlockingQueue(10)
+
+        private val windowPool = ThreadPoolExecutor(1, 3, 10, TimeUnit.SECONDS, windowQueue, CustomPolicy())
+        private val limiterPool = ThreadPoolExecutor(1, 3, 10, TimeUnit.SECONDS, limiterQueue, CustomPolicy())
     }
 
     private val serviceName = baseProperties.serviceName
@@ -50,18 +62,12 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private var predictedAccount: AtomicReference<AccountProperties?> = AtomicReference(accountStatisticsService.getProperties(predictedExtAccount))
     private val rateLimiter = RateLimiter(600)
 
-    private val limiterQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
-    private val windowQueue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue()
-
-    // TODO: fix errors for first test
-    // TODO: timeout
     init {
         accountStatisticsService.statistics.entries.forEach {
             requestExecutor.execute(it.value)
         }
-
-        runLimiterWorker()
-        runWindowWorker()
+        windowPool.prestartAllCoreThreads();
+        limiterPool.prestartAllCoreThreads()
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
@@ -76,10 +82,33 @@ class PaymentExternalServiceImpl @Autowired constructor(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
-
         // rate limiter -- 600 per ser
-        limiterQueue.add(requestData)
+        if (!limiterQueue.offer(Runnable {
+            while (true) {
+                if (rateLimiter.tick()) {
+                    if (!windowQueue.offer(Runnable {
+                        while (true) {
+                            if (window.putIntoWindow() is NonBlockingOngoingWindow.WindowResponse.Success) {
+                                Thread.sleep(5000)
+                                val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
+                                predictAccountAndSend(requestData)
+
+                                return@Runnable
+                            }
+                        }
+                    })) {
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = "Window overfill")
+                        }
+                    }
+                    return@Runnable
+                }
+            }
+        })) {
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "Rate limiter queue overfill")
+            }
+        }
     }
 
     private fun predictAccountAndSend(requestData: RequestData) {
@@ -110,30 +139,6 @@ class PaymentExternalServiceImpl @Autowired constructor(
                 break
             }
         }
-    }
-
-    private fun runWindowWorker() {
-        Thread {
-            while (true) {
-                if (windowQueue.isNotEmpty()) {
-                    if (window.putIntoWindow() is NonBlockingOngoingWindow.WindowResponse.Success) {
-                        predictAccountAndSend(windowQueue.poll())
-                    }
-                }
-            }
-        }.start()
-    }
-
-    private fun runLimiterWorker() {
-        Thread {
-            while (true) {
-                if (limiterQueue.isNotEmpty()) {
-                    if (rateLimiter.tick()) {
-                        windowQueue.add(limiterQueue.poll())
-                    }
-                }
-            }
-        }.start()
     }
 }
 
