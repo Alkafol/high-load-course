@@ -4,6 +4,7 @@ import okhttp3.*
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Component
 import ru.quipy.common.utils.NonBlockingOngoingWindow
+import ru.quipy.common.utils.RateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.config.AccountProperties
@@ -32,22 +33,31 @@ class RequestExecutor @Autowired constructor(
 ) {
 
     private val requestTimeout: Duration = Duration.ofMillis(80000)
-    private val httpClientExecutor = Executors.newFixedThreadPool(20)
+    private val httpClientExecutor = Executors.newFixedThreadPool(100)
     private val client = OkHttpClient.Builder()
-        .followRedirects(false)
+       // .followRedirects(false)
         .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
-        .connectionPool(ConnectionPool(100, 1000, TimeUnit.MILLISECONDS))
+    //    .connectionPool(ConnectionPool(1000, 10000, TimeUnit.MILLISECONDS))
         .run {
-            dispatcher(Dispatcher(httpClientExecutor))
+            dispatcher(
+                Dispatcher(httpClientExecutor).apply {
+                    maxRequestsPerHost = 50
+                    maxRequests = 50
+                }
+            )
             build()
         }
     private val responsePool = Executors.newFixedThreadPool(10)
 
     fun execute(accountProperties: AccountProperties) {
+        val limiter = RateLimiter(accountProperties.extProperties.rateLimitPerSec)
         Thread {
             while (true) {
                 val curRequestData = accountProperties.queue.poll()
                 if (curRequestData != null) {
+                    while (!limiter.tick()) {
+                        continue
+                    }
                     accountProperties.pool.execute {
                         sendRequest(curRequestData, accountProperties)
                     }
@@ -78,36 +88,38 @@ class RequestExecutor @Autowired constructor(
                 .enqueue(
                         object : Callback {
                             override fun onResponse(call: Call, response: Response) {
-                                accountStatisticsService.receiveResponse(accountProperties.extProperties)
-                                window.releaseWindow()
-
-                                val body = try {
-                                    PaymentExternalServiceImpl.mapper.readValue(
+                                response.use {
+                                    val body = try {
+                                        PaymentExternalServiceImpl.mapper.readValue(
                                             response.body?.string(),
                                             ExternalSysResponse::class.java
-                                    )
-                                } catch (e: Exception) {
-                                    PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                                    ExternalSysResponse(false, e.message)
-                                }
-
-                                responsePool.execute {
-                                    PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-                                    paymentESService.update(paymentId) {
-                                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                                        )
+                                    } catch (e: Exception) {
+                                        PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                                        ExternalSysResponse(false, e.message)
                                     }
+
+                                    responsePool.execute {
+                                        PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+                                        paymentESService.update(paymentId) {
+                                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                                        }
+                                    }
+
+                                    accountStatisticsService.receiveResponse(accountProperties.extProperties)
+                                    window.releaseWindow()
                                 }
                             }
 
                             override fun onFailure(call: Call, e: IOException) {
-                                accountStatisticsService.receiveResponse(accountProperties.extProperties)
-                                window.releaseWindow()
-
                                 PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, reason: ${e.message}")
 
                                 paymentESService.update(paymentId) {
                                     it.logProcessing(false, now(), transactionId, reason = e.message)
                                 }
+
+                                accountStatisticsService.receiveResponse(accountProperties.extProperties)
+                                window.releaseWindow()
                             }
                         }
                 )
