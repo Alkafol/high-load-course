@@ -2,11 +2,10 @@ package ru.quipy.payments.config
 
 import org.springframework.scheduling.concurrent.CustomizableThreadFactory
 import org.springframework.stereotype.Service
+import ru.quipy.common.utils.CustomPolicy
+import ru.quipy.common.utils.RateLimiter
 import ru.quipy.payments.logic.ExternalServiceProperties
-import ru.quipy.payments.logic.RequestData
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
@@ -14,9 +13,19 @@ class AccountProperties (
     val speed: Double?,
     val maxSize: Long = speed?.times(80)?.toLong() ?: error("Invalid speed"),
     val curRequestsAmount: AtomicInteger = AtomicInteger(0),
-    val queue: ConcurrentLinkedQueue<RequestData> = ConcurrentLinkedQueue(),
+    val queue: BlockingQueue<Runnable> = ArrayBlockingQueue(1000),
     val extProperties: ExternalServiceProperties,
-    val pool: ExecutorService = Executors.newFixedThreadPool(30, CustomizableThreadFactory("${extProperties.accountName}_"))
+
+    val limiter:RateLimiter = RateLimiter(extProperties.rateLimitPerSec),
+    val pool: ThreadPoolExecutor = ThreadPoolExecutor(
+        3,
+        20,
+        10,
+        TimeUnit.SECONDS,
+        queue,
+        CustomizableThreadFactory("${extProperties.accountName}_"),
+        CustomPolicy()
+    )
 )
 
 @Service

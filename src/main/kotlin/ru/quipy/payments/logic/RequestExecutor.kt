@@ -49,24 +49,7 @@ class RequestExecutor @Autowired constructor(
         }
     private val responsePool = Executors.newFixedThreadPool(10)
 
-    fun execute(accountProperties: AccountProperties) {
-        val limiter = RateLimiter(accountProperties.extProperties.rateLimitPerSec)
-        Thread {
-            while (true) {
-                val curRequestData = accountProperties.queue.poll()
-                if (curRequestData != null) {
-                    while (!limiter.tick()) {
-                        continue
-                    }
-                    accountProperties.pool.execute {
-                        sendRequest(curRequestData, accountProperties)
-                    }
-                }
-            }
-        }.start()
-    }
-
-    private fun sendRequest(requestData: RequestData, accountProperties: AccountProperties) {
+    fun sendRequest(requestData: RequestData, accountProperties: AccountProperties) {
         val serviceName = accountProperties.extProperties.serviceName
         val accountName = accountProperties.extProperties.accountName
         val transactionId = requestData.transactionId

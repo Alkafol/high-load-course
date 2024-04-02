@@ -31,7 +31,7 @@ class PaymentExternalServiceImpl @Autowired constructor(
     private val accountStatisticsService: AccountStatisticsService,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val requestExecutor: RequestExecutor,
-    private val window: NonBlockingOngoingWindow
+    private val window: NonBlockingOngoingWindow,
 ) : PaymentExternalService {
 
     private val baseProperties = ExternalServicesConfig.PRIMARY_ACCOUNT
@@ -45,7 +45,7 @@ class PaymentExternalServiceImpl @Autowired constructor(
         val mapper = ObjectMapper().registerKotlinModule()
 
         private val limiterQueue: BlockingQueue<Runnable> = ArrayBlockingQueue(1000)
-        private val windowQueue: BlockingQueue<Runnable> = ArrayBlockingQueue(10)
+        private val windowQueue: BlockingQueue<Runnable> = ArrayBlockingQueue(1000)
 
         private val windowPool = ThreadPoolExecutor(1, 3, 10, TimeUnit.SECONDS, windowQueue, CustomPolicy())
         private val limiterPool = ThreadPoolExecutor(1, 3, 10, TimeUnit.SECONDS, limiterQueue, CustomPolicy())
@@ -64,9 +64,9 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
     init {
         accountStatisticsService.statistics.entries.forEach {
-            requestExecutor.execute(it.value)
+            it.value.pool.prestartAllCoreThreads()
         }
-        windowPool.prestartAllCoreThreads();
+        windowPool.prestartAllCoreThreads()
         limiterPool.prestartAllCoreThreads()
     }
 
@@ -89,7 +89,7 @@ class PaymentExternalServiceImpl @Autowired constructor(
                     if (!windowQueue.offer(Runnable {
                         while (true) {
                             if (window.putIntoWindow() is NonBlockingOngoingWindow.WindowResponse.Success) {
-                                Thread.sleep(5000)
+                             //   Thread.sleep(5000)
                                 val requestData = RequestData(paymentId, amount, paymentStartedAt, transactionId)
                                 predictAccountAndSend(requestData)
 
@@ -129,7 +129,12 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
                 predictedAccount.compareAndSet(targetAccount, accountStatisticsService.getProperties(costlierAccount))
             } else {
-                targetAccount.queue.add(requestData)
+                targetAccount.queue.add(Runnable {
+                    while (!targetAccount.limiter.tick()) {
+                        continue
+                    }
+                    requestExecutor.sendRequest(requestData, targetAccount)
+                })
 
                 val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount.extProperties)
                 if (cheaperAccount != null) {
