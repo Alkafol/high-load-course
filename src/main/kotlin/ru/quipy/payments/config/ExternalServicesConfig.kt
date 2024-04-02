@@ -43,19 +43,19 @@ class ExternalServicesConfig {
         // Call costs 30
         private val accountProps_4 = ExternalServiceProperties(
             "test",
-            " default-4",
+            "default-4",
             parallelRequests = 8,
             rateLimitPerSec = 5,
             request95thPercentileProcessingTime = Duration.ofMillis(10_000),
         )
 
-        val PRIMARY_ACCOUNT = accountProps_3
+        val PRIMARY_ACCOUNT = accountProps_4
 
         fun getCheaper(account: ExternalServiceProperties?) =
             when (account) {
                 accountProps_1 -> accountProps_2
                 accountProps_2 -> accountProps_3
-           //     accountProps_3 -> accountProps_4
+                accountProps_3 -> accountProps_4
                 else -> null
             }
 
@@ -64,10 +64,10 @@ class ExternalServicesConfig {
             when (account) {
                 accountProps_2 -> accountProps_1
                 accountProps_3 -> accountProps_2
-          //      accountProps_4 -> accountProps_3
+                accountProps_4 -> accountProps_3
                 else -> null
             }
 
-        fun getAll() = listOf(accountProps_1, accountProps_2, accountProps_3) //  accountProps_4)
+        fun getAll() = listOf(accountProps_1, accountProps_2, accountProps_3, accountProps_4)
     }
 }
