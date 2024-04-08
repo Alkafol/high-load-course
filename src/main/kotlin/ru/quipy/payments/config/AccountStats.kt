@@ -1,10 +1,14 @@
 package ru.quipy.payments.config
 
+import okhttp3.Dispatcher
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import org.springframework.scheduling.concurrent.CustomizableThreadFactory
 import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CustomPolicy
 import ru.quipy.common.utils.RateLimiter
 import ru.quipy.payments.logic.ExternalServiceProperties
+import java.util.*
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
@@ -41,6 +45,19 @@ class AccountStatisticsService {
             )
         }
     )
+
+    val client = OkHttpClient.Builder()
+        .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
+        .run {
+            dispatcher(
+                Dispatcher(Executors.newFixedThreadPool(100)
+            ).apply {
+                    maxRequestsPerHost = 50
+                    maxRequests = 50
+                }
+            )
+            build()
+        }
 
     fun getProperties(account: ExternalServiceProperties): AccountProperties {
         return statistics[account] ?: error("Invalid account: ${account.accountName}")

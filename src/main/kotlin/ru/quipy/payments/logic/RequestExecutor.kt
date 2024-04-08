@@ -33,20 +33,6 @@ class RequestExecutor @Autowired constructor(
 ) {
 
     private val requestTimeout: Duration = Duration.ofMillis(80000)
-    private val httpClientExecutor = Executors.newFixedThreadPool(100)
-    private val client = OkHttpClient.Builder()
-       // .followRedirects(false)
-        .protocols(Collections.singletonList(Protocol.H2_PRIOR_KNOWLEDGE))
-    //    .connectionPool(ConnectionPool(1000, 10000, TimeUnit.MILLISECONDS))
-        .run {
-            dispatcher(
-                Dispatcher(httpClientExecutor).apply {
-                    maxRequestsPerHost = 50
-                    maxRequests = 50
-                }
-            )
-            build()
-        }
     private val responsePool = Executors.newFixedThreadPool(10)
 
     fun sendRequest(requestData: RequestData, accountProperties: AccountProperties) {
@@ -67,44 +53,44 @@ class RequestExecutor @Autowired constructor(
             post(PaymentExternalServiceImpl.emptyBody)
         }.build()
 
-        client.newCall(request)
-                .enqueue(
-                        object : Callback {
-                            override fun onResponse(call: Call, response: Response) {
-                                response.use {
-                                    val body = try {
-                                        PaymentExternalServiceImpl.mapper.readValue(
-                                            response.body?.string(),
-                                            ExternalSysResponse::class.java
-                                        )
-                                    } catch (e: Exception) {
-                                        PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                                        ExternalSysResponse(false, e.message)
-                                    }
-
-                                    responsePool.execute {
-                                        PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-                                        paymentESService.update(paymentId) {
-                                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                                        }
-                                    }
-
-                                    accountStatisticsService.receiveResponse(accountProperties.extProperties)
-                                    window.releaseWindow()
-                                }
+        accountStatisticsService.client.newCall(request)
+            .enqueue(
+                object : Callback {
+                    override fun onResponse(call: Call, response: Response) {
+                        response.use {
+                            val body = try {
+                                PaymentExternalServiceImpl.mapper.readValue(
+                                    response.body?.string(),
+                                    ExternalSysResponse::class.java
+                                )
+                            } catch (e: Exception) {
+                                PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                                ExternalSysResponse(false, e.message)
                             }
 
-                            override fun onFailure(call: Call, e: IOException) {
-                                PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, reason: ${e.message}")
-
+                            responsePool.execute {
+                                PaymentExternalServiceImpl.logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
                                 paymentESService.update(paymentId) {
-                                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
                                 }
-
-                                accountStatisticsService.receiveResponse(accountProperties.extProperties)
-                                window.releaseWindow()
                             }
+
+                            accountStatisticsService.receiveResponse(accountProperties.extProperties)
+                            window.releaseWindow()
                         }
-                )
+                    }
+
+                    override fun onFailure(call: Call, e: IOException) {
+                        PaymentExternalServiceImpl.logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, reason: ${e.message}")
+
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(false, now(), transactionId, reason = e.message)
+                        }
+
+                        accountStatisticsService.receiveResponse(accountProperties.extProperties)
+                        window.releaseWindow()
+                    }
+                }
+            )
     }
 }
