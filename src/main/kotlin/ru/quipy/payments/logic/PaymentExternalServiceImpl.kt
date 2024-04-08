@@ -129,12 +129,16 @@ class PaymentExternalServiceImpl @Autowired constructor(
 
                 predictedAccount.compareAndSet(targetAccount, accountStatisticsService.getProperties(costlierAccount))
             } else {
-                targetAccount.queue.add(Runnable {
+                if (!targetAccount.queue.offer(Runnable {
                     while (!targetAccount.limiter.tick()) {
                         continue
                     }
                     requestExecutor.sendRequest(requestData, targetAccount)
-                })
+                })) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Account queue overfill")
+                    }
+                }
 
                 val cheaperAccount = ExternalServicesConfig.getCheaper(targetAccount.extProperties)
                 if (cheaperAccount != null) {
